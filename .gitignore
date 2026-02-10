@@ -2,3 +2,6 @@ data
 run
 
 *.pt
+runs
+
+*.npy

@@ -5,14 +5,22 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "ai-edge-litert>=2.1.2",
     "matplotlib>=3.10.8",
     "numpy>=2.4.1",
+    "onnx>=1.20.1",
+    "onnx-graphsurgeon>=0.5.8",
+    "onnx2tf>=1.28.8",
+    "onnxruntime-gpu>=1.24.1",
+    "onnxslim>=0.1.84",
     "opencv-python>=4.13.0.90",
     "scikit-image>=0.26.0",
     "scikit-learn>=1.8.0",
     "scipy>=1.17.0",
+    "sng4onnx>=2.0.0",
     "sympy>=1.14.0",
     "tensorflow>=2.20.0",
+    "tf-keras>=2.15.0",
     "tqdm>=4.67.3",
     "ultralytics>=8.4.9",
 ]
@@ -52,3 +60,6 @@ explicit = true
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
+
+[dependency-groups]
+dev = ["ipython>=9.10.0", "jupyter>=1.1.1", "pip>=26.0.1"]
