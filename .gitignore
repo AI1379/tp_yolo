@@ -3,5 +3,9 @@ run
 
 *.pt
 runs
+artifacts
 
 *.npy
+
+__pycache__
+*.egg-info

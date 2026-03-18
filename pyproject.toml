@@ -14,6 +14,7 @@ dependencies = [
     "onnxruntime-gpu>=1.24.1",
     "onnxslim>=0.1.84",
     "opencv-python>=4.13.0.90",
+    "pandas>=3.0.1",
     "scikit-image>=0.26.0",
     "scikit-learn>=1.8.0",
     "scipy>=1.17.0",
@@ -60,6 +61,10 @@ explicit = true
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
+
+[tool.setuptools]
+packages = ["MoEYOLO"]
+
 
 [dependency-groups]
 dev = ["ipython>=9.10.0", "jupyter>=1.1.1", "pip>=26.0.1"]

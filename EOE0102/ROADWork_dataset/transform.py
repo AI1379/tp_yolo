@@ -1,7 +1,9 @@
+import argparse
+import shutil
+from pathlib import Path
+
 import cv2
 import numpy as np
-from pathlib import Path
-import shutil
 from tqdm import tqdm
 
 # ──────────────────────────────────────────────
@@ -24,19 +26,18 @@ MIN_POINTS      = 6    # 多边形最少顶点数
 # ──────────────────────────────────────────────
 # 2️⃣ 路径配置（根据你的实际目录修改）
 # ──────────────────────────────────────────────
-DATASET_ROOT  = Path(__file__).parent
-IMAGES_DIR    = DATASET_ROOT / "images"
-TRAIN_ANN_DIR = DATASET_ROOT / "train"
-VAL_ANN_DIR   = DATASET_ROOT / "val"
-OUTPUT_ROOT   = Path("./yolo_roadwork_v2")
+DATASET_ROOT = Path(__file__).parent
+DEFAULT_IMAGES_DIR = DATASET_ROOT / "images"
+DEFAULT_ANN_ROOT = DATASET_ROOT
+DEFAULT_OUTPUT_ROOT = DATASET_ROOT / "yolo_roadwork_v2"
 
 # ──────────────────────────────────────────────
 # 3️⃣ 颜色匹配函数
 # ──────────────────────────────────────────────
 def get_class_mask(color_img_rgb, target_rgb, tolerance=COLOR_TOLERANCE):
-    diff = color_img_rgb.astype(np.int32) - target_rgb.astype(np.int32)
-    dist = np.sqrt(np.sum(diff ** 2, axis=2))
-    return dist < tolerance
+    lower = np.clip(target_rgb - tolerance, 0, 255).astype(np.uint8)
+    upper = np.clip(target_rgb + tolerance, 0, 255).astype(np.uint8)
+    return cv2.inRange(color_img_rgb, lower, upper) > 0
 
 # ──────────────────────────────────────────────
 # 4️⃣ 轮廓提取函数（🔧 修复：返回所有有效轮廓）
@@ -84,7 +85,7 @@ def convert_one_image(ids_path, color_path, out_txt_path, debug=False):
     ids_img = cv2.imread(str(ids_path), cv2.IMREAD_UNCHANGED)
     color_bgr = cv2.imread(str(color_path))
     if ids_img is None or color_bgr is None:
-        return 0
+        return 0, []
 
     color_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
     h, w = ids_img.shape[:2]
@@ -97,6 +98,7 @@ def convert_one_image(ids_path, color_path, out_txt_path, debug=False):
         print(f"   IDs 图形状: {ids_img.shape}, 唯一值: {len(np.unique(ids_img))}")
 
     lines = []
+    class_ids = []
 
     for cls_name, (yolo_id, target_rgb) in CLASS_CONFIG.items():
         class_mask = get_class_mask(color_rgb, target_rgb)
@@ -115,43 +117,48 @@ def convert_one_image(ids_path, color_path, out_txt_path, debug=False):
             polys = extract_polygon(instance_mask)
             for poly in polys:
                 lines.append(f"{yolo_id} {poly}")
+                class_ids.append(yolo_id)
         else:
             for inst_id in instance_ids_in_class:
                 instance_mask = (class_mask & (ids_img == inst_id)).astype(np.uint8) * 255
                 polys = extract_polygon(instance_mask)
                 for poly in polys:
                     lines.append(f"{yolo_id} {poly}")
+                    class_ids.append(yolo_id)
 
     if lines:
         with open(out_txt_path, "w") as f:
             f.write("\n".join(lines))
-        return len(lines)
-    return 0
+        return len(lines), class_ids
+    return 0, []
 
 # ──────────────────────────────────────────────
 # 6️⃣ 建立图片名 → 标注文件 的对应关系
 # ──────────────────────────────────────────────
 def build_mapping(images_dir, ann_dir):
     mapping = {}
-    for jpg in images_dir.glob("*.jpg"):
-        stem = jpg.stem
+    for image_path in sorted(images_dir.iterdir()):
+        if not image_path.is_file() or image_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            continue
+
+        stem = image_path.stem
         ids_file = ann_dir / f"{stem}_Ids.png"
         color_file = ann_dir / f"{stem}_labelColors.png"
 
         if ids_file.exists() and color_file.exists():
-            mapping[jpg] = (ids_file, color_file)
+            mapping[image_path] = (ids_file, color_file)
 
     return mapping
 
 # ──────────────────────────────────────────────
 # 7️⃣ 处理一个分割（train 或 val）
 # ──────────────────────────────────────────────
-def process_split(split_name, images_dir, ann_dir, debug_first_n=5):
+def process_split(split_name, images_dir, ann_dir, output_root, debug_first_n=5):
     print(f"\n{'='*55}")
     print(f"处理 {split_name} 集...")
 
-    out_img_dir = OUTPUT_ROOT / "images" / split_name
-    out_lbl_dir = OUTPUT_ROOT / "labels" / split_name
+    out_img_dir = output_root / "images" / split_name
+    out_lbl_dir = output_root / "labels" / split_name
     out_img_dir.mkdir(parents=True, exist_ok=True)
     out_lbl_dir.mkdir(parents=True, exist_ok=True)
 
@@ -160,35 +167,65 @@ def process_split(split_name, images_dir, ann_dir, debug_first_n=5):
 
     valid_images = 0
     total_instances = 0
+    failed_images = 0
     class_counter = {name: 0 for name in CLASS_CONFIG}
     processed = 0
 
     for jpg_path, (ids_path, color_path) in tqdm(mapping.items(), desc=split_name):
         out_txt = out_lbl_dir / (jpg_path.stem + ".txt")
         debug = processed < debug_first_n  # 只调试前几张
-        n = convert_one_image(ids_path, color_path, out_txt, debug=debug)
 
-        if n > 0:
-            shutil.copy(jpg_path, out_img_dir / jpg_path.name)
-            valid_images += 1
-            total_instances += n
+        try:
+            n, class_ids = convert_one_image(ids_path, color_path, out_txt, debug=debug)
 
-            with open(out_txt) as f:
-                for line in f:
-                    cls_id = int(line.split()[0])
+            if n > 0:
+                shutil.copy(jpg_path, out_img_dir / jpg_path.name)
+                valid_images += 1
+                total_instances += n
+
+                for cls_id in class_ids:
                     for cls_name, (yolo_id, _) in CLASS_CONFIG.items():
                         if yolo_id == cls_id:
                             class_counter[cls_name] += 1
+        except Exception as exc:
+            failed_images += 1
+            print(f"跳过 {jpg_path.name}: {exc}")
         
         processed += 1
 
-    print(f"\n✅ {split_name} 完成：{valid_images} 张图片，{total_instances} 个实例")
+    print(f"\n✅ {split_name} 完成：{valid_images} 张图片，{total_instances} 个实例，{failed_images} 张失败")
     print("各类别实例数：")
     for cls_name, count in class_counter.items():
         bar = "█" * min(count // 50, 40)
         print(f"  {cls_name:<16} {count:>5}  {bar}")
 
     return valid_images
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Convert ROADWorks semantic annotations to YOLO segmentation format.")
+    parser.add_argument("--images-dir", type=Path, default=DEFAULT_IMAGES_DIR, help="Directory containing original images.")
+    parser.add_argument(
+        "--annotations-root",
+        type=Path,
+        default=DEFAULT_ANN_ROOT,
+        help="Directory containing train/ and val/ annotation folders, or gtFine/ as extracted from the zip.",
+    )
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help="Directory where YOLO output will be written.")
+    parser.add_argument("--debug-first-n", type=int, default=5, help="Print debug info for the first N images in each split.")
+    parser.add_argument("--skip-verify", action="store_true", help="Skip sample color verification.")
+    return parser.parse_args()
+
+
+def resolve_annotation_dirs(annotations_root: Path) -> tuple[Path, Path]:
+    if (annotations_root / "train").exists() and (annotations_root / "val").exists():
+        return annotations_root / "train", annotations_root / "val"
+
+    gt_fine_root = annotations_root / "gtFine"
+    if (gt_fine_root / "train").exists() and (gt_fine_root / "val").exists():
+        return gt_fine_root / "train", gt_fine_root / "val"
+
+    raise FileNotFoundError(f"Could not find train/val annotations under {annotations_root}")
 
 # ──────────────────────────────────────────────
 # 8️⃣ 验证颜色匹配
@@ -214,27 +251,28 @@ def verify_colors(sample_color_path):
 # 主程序
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
-    sample = TRAIN_ANN_DIR / "boston_2d8e13b1a8304d8395dcf6479ca61814_000000_05100_labelColors.png"
-    verify_colors(sample)
+    args = parse_args()
+    train_ann_dir, val_ann_dir = resolve_annotation_dirs(args.annotations_root)
 
-    # 🔧 添加：验证 IDs 图
-    sample_ids = TRAIN_ANN_DIR / "boston_2d8e13b1a8304d8395dcf6479ca61814_000000_05100_Ids.png"
-    ids_img = cv2.imread(str(sample_ids), cv2.IMREAD_UNCHANGED)
-    if ids_img is not None:
-        print(f"\n🔍 IDs 图信息:")
-        print(f"   形状: {ids_img.shape}")
-        print(f"   类型: {ids_img.dtype}")
-        print(f"   唯一值数量: {len(np.unique(ids_img))}")
-        print(f"   唯一值示例: {np.unique(ids_img)[:20]}")
+    if not args.skip_verify:
+        sample = train_ann_dir / "boston_2d8e13b1a8304d8395dcf6479ca61814_000000_05100_labelColors.png"
+        if sample.exists():
+            verify_colors(sample)
 
-    print("\n按 Enter 开始转换...")
-    input()
+            sample_ids = train_ann_dir / "boston_2d8e13b1a8304d8395dcf6479ca61814_000000_05100_Ids.png"
+            ids_img = cv2.imread(str(sample_ids), cv2.IMREAD_UNCHANGED)
+            if ids_img is not None:
+                print(f"\n🔍 IDs 图信息:")
+                print(f"   形状: {ids_img.shape}")
+                print(f"   类型: {ids_img.dtype}")
+                print(f"   唯一值数量: {len(np.unique(ids_img))}")
+                print(f"   唯一值示例: {np.unique(ids_img)[:20]}")
 
-    train_count = process_split("train", IMAGES_DIR, TRAIN_ANN_DIR, debug_first_n=5)
-    val_count = process_split("val", IMAGES_DIR, VAL_ANN_DIR, debug_first_n=5)
+    train_count = process_split("train", args.images_dir, train_ann_dir, args.output_root, debug_first_n=args.debug_first_n)
+    val_count = process_split("val", args.images_dir, val_ann_dir, args.output_root, debug_first_n=args.debug_first_n)
 
     yaml_lines = [
-        f"path: {OUTPUT_ROOT.absolute()}",
+        f"path: {args.output_root.absolute()}",
         "train: images/train",
         "val:   images/val",
         "",
@@ -245,7 +283,7 @@ if __name__ == "__main__":
         yolo_id = CLASS_CONFIG[cls_name][0]
         yaml_lines.append(f"  {yolo_id}: {cls_name}")
 
-    yaml_path = OUTPUT_ROOT / "data.yaml"
+    yaml_path = args.output_root / "data.yaml"
     with open(yaml_path, "w") as f:
         f.write("\n".join(yaml_lines))
 
